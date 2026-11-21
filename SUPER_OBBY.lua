@@ -1,0 +1,2067 @@
+--------------------------------------------------------------------------------
+--  🎮  SUPER OBBY ⚡  —  TODO-EN-UNO (1 solo script, sin configurar nada más)
+--
+--  COMO USARLO:
+--    1. Abre Roblox Studio → crea un lugar nuevo (Baseplate).
+--    2. En el Explorador: ServerScriptService → Insertar → Script (Script normal,
+--       NO LocalScript). Borra el código que trae y pega TODO este archivo.
+--    3. Dale a Play. El juego se construye solo: mapa con 15 etapas distintas,
+--       lobby con tienda, checkpoints con guardado, UIs, sonidos, tablas de
+--       clasificación globales, isla de campeones, lluvia de puntos y más.
+--
+--  Todo lo editable está abajo en CONFIG. ¡Diviértete y a hacerse famoso! 🚀
+--------------------------------------------------------------------------------
+
+-- ============================ CONFIGURACIÓN ============================== --
+local CONFIG = {
+	GAME_NAME        = "SUPER OBBY ⚡",
+	VERSION          = "1.0.0",
+
+	STAGES           = 15,     -- número de etapas del obby
+	STAGE_LEN        = 130,    -- largo de cada zona de etapa (studs)
+	BASE_Y           = 100,    -- altura del suelo principal
+	EXIT_Z           = -70,    -- borde del lobby hacia las etapas
+
+	KILL_Y           = 55,     -- caer por debajo = muerte (abismo)
+	POINTS_PER_STAGE = 10,     -- puntos al llegar a un checkpoint nuevo
+	POINTS_WIN       = 500,    -- puntos por completar el obby
+	WELCOME_POINTS   = 25,     -- regalo de bienvenida
+	SKIP_COST        = 100,    -- costo del portal para saltar etapa
+	DAILY_BASE       = 100,    -- recompensa diaria base (x racha, máx x7)
+
+	JUMP_BASE        = 50,     -- JumpPower inicial
+	JUMP_PER_LEVEL   = 6,      -- mejora de salto por nivel
+	JUMP_COST        = 200,
+	JUMP_MAX_LEVEL   = 5,
+
+	SPEED_BASE       = 16,     -- WalkSpeed inicial
+	SPEED_PER_LEVEL  = 4,      -- mejora de velocidad por nivel
+	SPEED_COST       = 150,
+	SPEED_MAX_LEVEL  = 3,
+
+	MUSIC_ID         = 0,      -- Audio ID con derechos de uso (0 = sin música)
+	MUSIC_VOLUME     = 0.45,
+
+	VIP_PASS_ID      = 0,      -- ID de tu Game Pass VIP (0 = desactivado)
+	                             -- VIP: x2 recompensa diaria, tag 👑 dorado y estela VIP
+
+	AUTOSAVE_SECONDS = 120,    -- autoguardado de datos
+	EVENT_MIN        = 300,    -- lluvia de puntos: cada 5-8 minutos
+	EVENT_MAX        = 480,
+	EVENT_POINTS     = 50,
+}
+
+-- =============================== SERVICIOS =============================== --
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local DataStoreService = game:GetService("DataStoreService")
+local SoundService     = game:GetService("SoundService")
+local Lighting         = game:GetService("Lighting")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+-- ============================ ESTADO COMPARTIDO =========================== --
+local CHECKPOINTS = {}   -- [n] = CFrame del checkpoint n (1 = lobby)
+local KILLPARTS   = {}   -- partes letales registradas
+local ROTATORS    = {}   -- {part, pivot, speed} barras giratorias letales
+local PENDULUMS   = {}   -- {part, pivot, len, maxA, w, phase} martillos
+local CONVEYORS   = {}   -- [part] = Vector3 (velocidad de la cinta)
+local PDATA       = {}   -- [player] = tabla de datos de la sesión
+local DEATHCOOL   = {}   -- [player] = os.clock() de la última muerte
+local NAME_CACHE  = {}   -- [userId] = nombre (para tablas)
+local CHAMPS      = {}   -- últimos ganadores de esta sesión
+local TOTAL       = { visits = 0, deaths = 0, wins = 0 }
+
+local STAGE_NAMES = {
+	"Primeros Saltos", "Plataformas Viajeras", "Hélices Mortales",
+	"Río de Lava", "Plataformas Fantasma", "Cintas Cósmicas",
+	"Trampolines Lunares", "Martillos Colosales", "Cuerda Floja",
+	"Río Helado", "Salto Lunar", "Autopista Turbo",
+	"Pistones Aplastantes", "Espiral Celeste", "Torre del Cielo",
+}
+
+local PALETTE = {
+	rojo    = Color3.fromRGB(255, 64, 64),
+	naranja = Color3.fromRGB(255, 140, 40),
+	amarillo= Color3.fromRGB(255, 220, 60),
+	verde   = Color3.fromRGB(70, 220, 110),
+	cian    = Color3.fromRGB(60, 220, 230),
+	azul    = Color3.fromRGB(70, 120, 255),
+	morado  = Color3.fromRGB(170, 80, 255),
+	rosa    = Color3.fromRGB(255, 90, 180),
+	blanco  = Color3.fromRGB(245, 245, 245),
+	gris    = Color3.fromRGB(70, 70, 80),
+	grisClaro=Color3.fromRGB(160, 165, 175),
+	lava    = Color3.fromRGB(255, 70, 20),
+	hielo   = Color3.fromRGB(175, 225, 255),
+	oro     = Color3.fromRGB(255, 200, 40),
+	pasto   = Color3.fromRGB(90, 200, 90),
+	madera  = Color3.fromRGB(170, 120, 70),
+}
+
+local CHECK_COLORS = { PALETTE.rojo, PALETTE.naranja, PALETTE.amarillo, PALETTE.verde,
+	PALETTE.cian, PALETTE.azul, PALETTE.morado, PALETTE.rosa }
+
+-- Sonidos integrados de Roblox (siempre disponibles, sin permisos)
+local SND = {
+	ping   = "rbxasset://sounds/electronicpingshort.wav",
+	death  = "rbxasset://sounds/uuhhh.mp3",
+	whoosh = "rbxasset://sounds/swoosh.wav",
+	buy    = "rbxasset://sounds/unsheath.wav",
+}
+
+-- ============================== UTILIDADES ================================ --
+local MAP = Instance.new("Folder")
+MAP.Name = "ObbyMap"
+MAP.Parent = workspace
+
+-- Crea una Part con propiedades; props van después para sobreescribir
+local function part(props, parent)
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.TopSurface = Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Material = Enum.Material.SmoothPlastic
+	for k, v in pairs(props) do
+		p[k] = v
+	end
+	p.Parent = parent or MAP
+	return p
+end
+
+-- Bloque por centro de tamaño (sx, sy, sz)
+local function block(cx, cy, cz, sx, sy, sz, color, props)
+	local t = {
+		Size = Vector3.new(sx, sy, sz),
+		CFrame = CFrame.new(cx, cy, cz),
+		Color = color or PALETTE.gris,
+	}
+	if props then
+		for k, v in pairs(props) do t[k] = v end
+	end
+	return part(t)
+end
+
+-- Plataforma de 1 stud de grosor cuyo borde superior queda en topY
+local function plataforma(cx, topY, cz, sx, sz, color, props)
+	return block(cx, topY - 0.5, cz, sx, 1, sz, color, props)
+end
+
+local function playerFromHit(hit)
+	local plr = Players:GetPlayerFromCharacter(hit.Parent)
+	if not plr and hit.Parent and hit.Parent.Parent then
+		plr = Players:GetPlayerFromCharacter(hit.Parent.Parent)
+	end
+	return plr
+end
+
+local function sonidoGlobal(id, vol, pitch)
+	local s = Instance.new("Sound")
+	s.SoundId = id
+	s.Volume = vol or 0.5
+	s.PlaybackSpeed = pitch or 1
+	s.Parent = SoundService
+	s:Play()
+	task.delay(3, function() s:Destroy() end)
+end
+
+local function sonidoEn(padre, id, vol, pitch)
+	if not padre then return end
+	local s = Instance.new("Sound")
+	s.SoundId = id
+	s.Volume = vol or 0.6
+	s.PlaybackSpeed = pitch or 1
+	s.Parent = padre
+	s:Play()
+	task.delay(3, function() s:Destroy() end)
+end
+
+-- BillboardGui de texto flotante sobre una parte
+local function cartel(padre, texto, tamY, color, offset, maxDist)
+	local bb = Instance.new("BillboardGui")
+	bb.Size = UDim2.new(14, 0, tamY or 3, 0)
+	bb.StudsOffset = offset or Vector3.new(0, 4, 0)
+	bb.AlwaysOnTop = false
+	bb.MaxDistance = maxDist or 140
+	bb.Parent = padre
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextScaled = true
+	lbl.Text = texto
+	lbl.TextColor3 = color or Color3.new(1, 1, 1)
+	lbl.TextStrokeTransparency = 0.2
+	lbl.Parent = bb
+	return bb, lbl
+end
+
+-- Teletransporta el personaje a un CFrame
+local function teleport(plr, cf)
+	local char = plr.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		char:PivotTo(cf + Vector3.new(0, 4, 0))
+		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	end
+end
+
+-- ========================= DATOS Y GUARDADO ============================== --
+-- Esquema por jugador: etapa, puntos, victorias, muertes, racha diaria,
+-- estelas compradas/equipada, mejoras de salto y velocidad, VIP.
+local DATA_OK, playerStore, odsStage, odsPoints = pcall(function()
+	local s = DataStoreService:GetDataStore("SuperObby_v1")
+	return true, s, DataStoreService:GetOrderedDataStore("SuperObbyBoard_v1", "etapas"),
+		DataStoreService:GetOrderedDataStore("SuperObbyBoard_v1", "puntos")
+end)
+if not DATA_OK then
+	warn("[SuperObby] DataStore no disponible (activa 'Studio Access to API Services'). Los datos no se guardarán.")
+end
+
+local function datosPorDefecto()
+	return {
+		Stage = 1, Points = CONFIG.WELCOME_POINTS, Wins = 0, Deaths = 0,
+		LastDaily = 0, Streak = 0, Trails = { polvo = true },
+		Equipped = "polvo", JumpLv = 0, SpeedLv = 0, VIP = false,
+	}
+end
+
+local lastSave = {}   -- [player] = os.time() del último guardado
+
+local function guardarTablas(plr)
+	if not DATA_OK then return end
+	local data = PDATA[plr]
+	if not data or data.noSave then return end
+	local uid = plr.UserId
+	local key = "p_" .. uid
+	pcall(function()
+		playerStore:SetAsync(key, {
+			Stage = data.Stage, Points = data.Points, Wins = data.Wins,
+			Deaths = data.Deaths, LastDaily = data.LastDaily, Streak = data.Streak,
+			Trails = data.Trails, Equipped = data.Equipped,
+			JumpLv = data.JumpLv, SpeedLv = data.SpeedLv,
+		})
+	end)
+	pcall(function() odsStage:SetAsync(key, data.Stage) end)
+	pcall(function() odsPoints:SetAsync(key, data.Points) end)
+	lastSave[plr] = os.time()
+end
+
+-- Guardado con freno (mínimo 8s entre guardados del mismo jugador)
+local saving = {}
+local function scheduleSave(plr)
+	if not DATA_OK then return end
+	local data = PDATA[plr]
+	if not data or data.noSave then return end
+	if saving[plr] then return end
+	saving[plr] = true
+	task.spawn(function()
+		task.wait(8)
+		if PDATA[plr] then
+			guardarTablas(plr)
+		end
+		saving[plr] = nil
+	end)
+end
+
+local function cargarDatos(plr)
+	local data = datosPorDefecto()
+	if DATA_OK then
+		local ok, res = pcall(function()
+			return playerStore:GetAsync("p_" .. plr.UserId)
+		end)
+		if ok and type(res) == "table" then
+			for k, v in pairs(res) do
+				data[k] = v
+			end
+			if type(data.Trails) ~= "table" then data.Trails = { polvo = true } end
+			data.Stage = math.clamp(math.floor(data.Stage or 1), 1, CONFIG.STAGES)
+			data.Points = math.max(math.floor(data.Points or 0), 0)
+		elseif not ok then
+			data.noSave = true -- falló la lectura: no sobreescribir datos
+			warn("[SuperObby] No se pudieron cargar datos de " .. plr.Name .. ". Modo invitado.")
+		end
+	else
+		data.noSave = true
+	end
+	return data
+end
+
+-- leaderstats visibles en la lista de jugadores
+local function crearLeaderstats(plr, data)
+	local ls = Instance.new("Folder")
+	ls.Name = "leaderstats"
+	ls.Parent = plr
+
+	local etapa = Instance.new("IntValue")
+	etapa.Name = "Etapa"
+	etapa.Value = data.Stage
+	etapa.Parent = ls
+
+	local puntos = Instance.new("IntValue")
+	puntos.Name = "Puntos"
+	puntos.Value = data.Points
+	puntos.Parent = ls
+
+	local victorias = Instance.new("IntValue")
+	victorias.Name = "Victorias"
+	victorias.Value = data.Wins
+	victorias.Parent = ls
+
+	local muertes = Instance.new("IntValue")
+	muertes.Name = "Muertes"
+	muertes.Value = data.Deaths
+	muertes.Parent = ls
+end
+
+local function applyStats(plr)
+	local data = PDATA[plr]
+	local char = plr.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.UseJumpPower = true
+		hum.JumpPower = CONFIG.JUMP_BASE + (data.JumpLv or 0) * CONFIG.JUMP_PER_LEVEL
+		hum.WalkSpeed = CONFIG.SPEED_BASE + (data.SpeedLv or 0) * CONFIG.SPEED_PER_LEVEL
+	end
+end
+
+-- Declaraciones adelantadas (se definen en la parte de gameplay)
+local setStage, awardPoints, aplicarEstela, actualizarTag, refreshHUD
+local toast, globalToast, victoria
+local comprarMejoraSalto, comprarMejoraVelocidad, reclamarDiario
+local saltarEtapa, irACheckpoint, reiniciarAventura, reclamarVIP, ganarPartida
+
+-- ========================= TIENDA DE ESTELAS ============================= --
+local TRAILS = {
+	{ id = "polvo",     nombre = "✨ Polvo Estelar", costo = 0,    gratis = true,
+		c1 = Color3.fromRGB(255,255,255), c2 = Color3.fromRGB(170,200,255) },
+	{ id = "fuego",     nombre = "🔥 Fuego",        costo = 150,
+		c1 = Color3.fromRGB(255,150,40),  c2 = Color3.fromRGB(255,40,40) },
+	{ id = "hielo",     nombre = "❄️ Hielo",        costo = 200,
+		c1 = Color3.fromRGB(170,240,255), c2 = Color3.fromRGB(80,140,255) },
+	{ id = "veneno",    nombre = "☠️ Veneno",       costo = 300,
+		c1 = Color3.fromRGB(130,255,90),  c2 = Color3.fromRGB(90,20,200) },
+	{ id = "estrellas", nombre = "🌟 Estrellas",    costo = 450, brillo = true,
+		c1 = Color3.fromRGB(255,230,120), c2 = Color3.fromRGB(255,150,220) },
+	{ id = "rayo",      nombre = "⚡ Rayo",         costo = 600,
+		c1 = Color3.fromRGB(255,255,130), c2 = Color3.fromRGB(120,180,255) },
+	{ id = "arcoiris",  nombre = "🌈 Arcoíris",     costo = 1000, arcoiris = true },
+	{ id = "campeon",   nombre = "🏆 Campeón",      costo = 0, soloGanador = true,
+		c1 = Color3.fromRGB(255,215,0), c2 = Color3.fromRGB(255,120,0), brillo = true },
+	{ id = "vip",       nombre = "👑 VIP",          costo = 0, soloVIP = true, arcoiris = true },
+}
+local TRAIL_POR_ID = {}
+for _, def in ipairs(TRAILS) do
+	TRAIL_POR_ID[def.id] = def
+end
+
+-- ============================ HUD POR JUGADOR ============================= --
+local function construirHUD(plr)
+	local pg = plr:FindFirstChildOfClass("PlayerGui")
+	if not pg then
+		pg = plr:WaitForChild("PlayerGui", 10)
+	end
+	if not pg then return end
+	local data = PDATA[plr]
+	if not data then return end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "ObbyHUD"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 10
+	gui.Parent = pg
+
+	local function etiqueta(props)
+		local lbl = Instance.new("TextLabel")
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.GothamBlack
+		lbl.TextScaled = true
+		for k, v in pairs(props) do lbl[k] = v end
+		lbl.Parent = gui
+		return lbl
+	end
+
+	-- Título arriba al centro
+	local titulo = etiqueta({
+		Size = UDim2.new(0.26, 0, 0.045, 0), Position = UDim2.new(0.37, 0, 0.012, 0),
+		Text = CONFIG.GAME_NAME, TextColor3 = Color3.fromRGB(255, 220, 60),
+	})
+	local strokeT = Instance.new("UIStroke")
+	strokeT.Thickness = 2.5
+	strokeT.Parent = titulo
+
+	-- Etapa debajo del título
+	local etapa = etiqueta({
+		Size = UDim2.new(0.3, 0, 0.038, 0), Position = UDim2.new(0.35, 0, 0.062, 0),
+		Text = "", TextColor3 = Color3.new(1, 1, 1),
+	})
+	local strokeE = Instance.new("UIStroke")
+	strokeE.Thickness = 2
+	strokeE.Parent = etapa
+
+	-- Puntos y victorias arriba a la izquierda
+	local puntos = etiqueta({
+		Size = UDim2.new(0.2, 0, 0.038, 0), Position = UDim2.new(0.01, 0, 0.012, 0),
+		Text = "", TextColor3 = Color3.fromRGB(255, 230, 120),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	local victorias = etiqueta({
+		Size = UDim2.new(0.2, 0, 0.034, 0), Position = UDim2.new(0.01, 0, 0.052, 0),
+		Text = "", TextColor3 = Color3.fromRGB(255, 190, 90),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	-- Racha arriba a la derecha
+	local racha = etiqueta({
+		Size = UDim2.new(0.2, 0, 0.034, 0), Position = UDim2.new(0.79, 0, 0.012, 0),
+		Text = "", TextColor3 = Color3.fromRGB(255, 140, 200),
+		TextXAlignment = Enum.TextXAlignment.Right,
+	})
+
+	-- Consejo rotativo abajo
+	local consejo = etiqueta({
+		Size = UDim2.new(0.6, 0, 0.03, 0), Position = UDim2.new(0.2, 0, 0.955, 0),
+		Text = "", TextColor3 = Color3.fromRGB(220, 220, 255),
+		TextTransparency = 0.15,
+	})
+
+	-- Aviso central (toasts)
+	local aviso = etiqueta({
+		Size = UDim2.new(0.7, 0, 0.075, 0), Position = UDim2.new(0.15, 0, 0.13, 0),
+		Text = "", TextColor3 = Color3.new(1, 1, 1), Visible = false,
+	})
+	local strokeA = Instance.new("UIStroke")
+	strokeA.Thickness = 3
+	strokeA.Parent = aviso
+
+	-- Pantalla de bienvenida
+	local bienvenida = Instance.new("Frame")
+	bienvenida.Size = UDim2.new(0.55, 0, 0.34, 0)
+	bienvenida.Position = UDim2.new(0.225, 0, 0.33, 0)
+	bienvenida.BackgroundColor3 = Color3.fromRGB(25, 25, 45)
+	bienvenida.BackgroundTransparency = 0.15
+	bienvenida.Visible = false
+	bienvenida.Parent = gui
+	Instance.new("UICorner").Parent = bienvenida
+	local bTitulo = Instance.new("TextLabel")
+	bTitulo.Size = UDim2.new(1, 0, 0.3, 0)
+	bTitulo.BackgroundTransparency = 1
+	bTitulo.Font = Enum.Font.FredokaOne
+	bTitulo.TextScaled = true
+	bTitulo.Text = "¡BIENVENIDO A " .. CONFIG.GAME_NAME .. "!"
+	bTitulo.TextColor3 = Color3.fromRGB(255, 220, 60)
+	bTitulo.Parent = bienvenida
+	local bTexto = Instance.new("TextLabel")
+	bTexto.Size = UDim2.new(0.9, 0, 0.68, 0)
+	bTexto.Position = UDim2.new(0.05, 0, 0.3, 0)
+	bTexto.BackgroundTransparency = 1
+	bTexto.Font = Enum.Font.GothamBold
+	bTexto.TextScaled = true
+	bTexto.TextWrapped = true
+	bTexto.TextColor3 = Color3.new(1, 1, 1)
+	bTexto.Text = "Crusza las 15 etapas: lava, cintas, martillos, hielo y más.\n\n"
+		.. "🟢 Losetas de colores = tienda y mejoras\n🎁 Cofre dorado = recompensa diaria\n"
+		.. "🟪 Portal morado = saltar etapa\n💾 Tu progreso se guarda solo"
+	bTexto.Parent = bienvenida
+
+	-- Pantalla de victoria
+	local ganar = Instance.new("Frame")
+	ganar.Size = UDim2.new(0.6, 0, 0.4, 0)
+	ganar.Position = UDim2.new(0.2, 0, 0.3, 0)
+	ganar.BackgroundColor3 = Color3.fromRGB(50, 20, 60)
+	ganar.BackgroundTransparency = 0.1
+	ganar.Visible = false
+	ganar.Parent = gui
+	Instance.new("UICorner").Parent = ganar
+	local gTitulo = Instance.new("TextLabel")
+	gTitulo.Size = UDim2.new(1, 0, 0.38, 0)
+	gTitulo.BackgroundTransparency = 1
+	gTitulo.Font = Enum.Font.FredokaOne
+	gTitulo.TextScaled = true
+	gTitulo.Text = "🏆 ¡GANASTE EL OBBY! 🏆"
+	gTitulo.TextColor3 = Color3.fromRGB(255, 220, 60)
+	gTitulo.Parent = ganar
+	local gTexto = Instance.new("TextLabel")
+	gTexto.Size = UDim2.new(0.9, 0, 0.55, 0)
+	gTexto.Position = UDim2.new(0.05, 0, 0.4, 0)
+	gTexto.BackgroundTransparency = 1
+	gTexto.Font = Enum.Font.GothamBlack
+	gTexto.TextScaled = true
+	gTexto.TextWrapped = true
+	gTexto.TextColor3 = Color3.new(1, 1, 1)
+	gTexto.Parent = ganar
+
+	data.__gui = {
+		etapa = etapa, puntos = puntos, victorias = victorias, racha = racha,
+		aviso = aviso, consejo = consejo, bienvenida = bienvenida, ganar = ganar, gTexto = gTexto,
+	}
+end
+
+function toast(plr, texto, secs, color)
+	local data = PDATA[plr]
+	if not data or not data.__gui then return end
+	local lbl = data.__gui.aviso
+	lbl.Text = texto
+	lbl.TextColor3 = color or Color3.new(1, 1, 1)
+	lbl.Visible = true
+	task.delay(secs or 3, function()
+		if lbl.Text == texto then lbl.Visible = false end
+	end)
+end
+
+function globalToast(texto, color, secs)
+	for plr in pairs(PDATA) do
+		toast(plr, texto, secs or 3.5, color)
+	end
+end
+
+function refreshHUD(plr)
+	local data = PDATA[plr]
+	if not data or not data.__gui then return end
+	local ls = plr:FindFirstChild("leaderstats")
+	if not ls then return end
+	local g = data.__gui
+	local etapa = ls:FindFirstChild("Etapa")
+	if etapa then
+		local n = math.min(etapa.Value, CONFIG.STAGES)
+		g.etapa.Text = "ETAPA " .. n .. "/" .. CONFIG.STAGES .. " — " .. (STAGE_NAMES[n] or "")
+	end
+	local p = ls:FindFirstChild("Puntos")
+	if p then g.puntos.Text = "⭐ Puntos: " .. p.Value end
+	local v = ls:FindFirstChild("Victorias")
+	if v then g.victorias.Text = "🏆 Victorias: " .. v.Value end
+	local r = math.min(data.Streak or 0, 7)
+	if r > 0 then
+		g.racha.Text = "🔥 Racha diaria: " .. r .. " (x" .. r .. ")"
+	end
+end
+
+-- Tag flotante sobre la cabeza (nombre + etapa + VIP)
+function actualizarTag(plr)
+	local data = PDATA[plr]
+	if not data or not data.__tag then return end
+	local ls = plr:FindFirstChild("leaderstats")
+	local n = ls and ls:FindFirstChild("Etapa") and ls.Etapa.Value or data.Stage
+	n = math.min(n, CONFIG.STAGES)
+	local vip = data.VIP
+	data.__tag.texto.Text = (vip and "👑 " or "") .. plr.DisplayName .. "\nEtapa " .. n .. "/" .. CONFIG.STAGES
+	data.__tag.texto.TextColor3 = vip and Color3.fromRGB(255, 215, 80) or Color3.new(1, 1, 1)
+end
+
+local function crearTag(plr)
+	local char = plr.Character
+	local head = char and char:FindFirstChild("Head")
+	local data = PDATA[plr]
+	if not head or not data then return end
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "ObbyTag"
+	bb.Size = UDim2.new(7, 0, 2, 0)
+	bb.StudsOffset = Vector3.new(0, 2.4, 0)
+	bb.MaxDistance = 70
+	bb.Parent = head
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.GothamBlack
+	lbl.TextScaled = true
+	lbl.TextStrokeTransparency = 0.25
+	lbl.Text = plr.DisplayName
+	lbl.Parent = bb
+	data.__tag = { bb = bb, texto = lbl }
+	actualizarTag(plr)
+end
+
+-- Estela visual tras el personaje
+function aplicarEstela(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local char = plr.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	-- limpia la estela anterior
+	data.__estelaGen = (data.__estelaGen or 0) + 1
+	if data.__estelaVieja then
+		for _, obj in ipairs(data.__estelaVieja) do
+			obj:Destroy()
+		end
+		data.__estelaVieja = nil
+	end
+
+	local def = TRAIL_POR_ID[data.Equipped]
+	if not def then return end
+
+	local a0 = Instance.new("Attachment")
+	a0.Position = Vector3.new(0, 1, 0)
+	a0.Parent = hrp
+	local a1 = Instance.new("Attachment")
+	a1.Position = Vector3.new(0, -1, 0)
+	a1.Parent = hrp
+	local tr = Instance.new("Trail")
+	tr.Name = "ObbyTrail"
+	tr.Attachment0 = a0
+	tr.Attachment1 = a1
+	tr.Lifetime = 0.45
+	tr.LightEmission = 1
+	tr.FaceCamera = true
+	tr.Transparency = NumberSequence.new(0.15, 1)
+	tr.WidthScale = NumberSequence.new(1, 0.2)
+	tr.Color = def.c1 and ColorSequence.new(def.c1, def.c2) or ColorSequence.new(Color3.new(1,1,1))
+	tr.Parent = hrp
+	local piezas = { a0, a1, tr }
+
+	if def.brillo then
+		local em = Instance.new("ParticleEmitter")
+		em.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+		em.Rate = 14
+		em.Lifetime = NumberRange.new(0.5, 1)
+		em.Speed = NumberRange.new(1, 3)
+		em.Color = ColorSequence.new(def.c1, def.c2)
+		em.LightEmission = 1
+		em.Size = NumberSequence.new(0.7, 0)
+		em.Parent = hrp
+		table.insert(piezas, em)
+	end
+	data.__estelaVieja = piezas
+
+	if def.arcoiris then
+		local gen = data.__estelaGen
+		local hue = math.random()
+		task.spawn(function()
+			while data.__estelaGen == gen and tr.Parent and plr.Parent do
+				hue = (hue + 0.03) % 1
+				tr.Color = ColorSequence.new(
+					Color3.fromHSV(hue, 1, 1),
+					Color3.fromHSV((hue + 0.22) % 1, 1, 1)
+				)
+				task.wait(0.25)
+			end
+		end)
+	end
+end
+
+-- Comprar / equipar estela desde las losetas de la tienda
+local function comprarEstela(plr, def)
+	local data = PDATA[plr]
+	local ls = plr:FindFirstChild("leaderstats")
+	if not data or not ls then return end
+	local puntos = ls:FindFirstChild("Puntos")
+	if not puntos then return end
+
+	if def.soloVIP and not data.VIP then
+		toast(plr, "👑 ¡Necesitas el pase VIP para esta estela!", 3, Color3.fromRGB(255, 215, 80))
+		return
+	end
+	if def.soloGanador then
+		if data.Trails[def.id] then
+			data.Equipped = def.id
+			aplicarEstela(plr)
+			toast(plr, def.nombre .. " equipada 🏆", 2.5)
+		else
+			toast(plr, "🏆 ¡Gana el obby para desbloquear la estela Campeón!", 3)
+		end
+		return
+	end
+
+	if not data.Trails[def.id] then
+		if puntos.Value < def.costo then
+			toast(plr, "Te faltan " .. (def.costo - puntos.Value) .. "⭐ para " .. def.nombre, 2.5, Color3.fromRGB(255, 120, 120))
+			return
+		end
+		puntos.Value = puntos.Value - def.costo
+		data.Points = puntos.Value
+		data.Trails[def.id] = true
+		data.Equipped = def.id
+		aplicarEstela(plr)
+		sonidoGlobal(SND.buy, 0.4)
+		toast(plr, "🛒 ¡Compraste " .. def.nombre .. "! ¡Equipada!", 3, Color3.fromRGB(140, 255, 140))
+		refreshHUD(plr)
+		scheduleSave(plr)
+	else
+		if data.Equipped == def.id then
+			data.Equipped = "polvo"
+			aplicarEstela(plr)
+			toast(plr, "Estela quitada", 2)
+		else
+			data.Equipped = def.id
+			aplicarEstela(plr)
+			toast(plr, def.nombre .. " equipada ✨", 2)
+		end
+	end
+end
+
+-- ========================= AMBIENTE Y LUCES ============================== --
+Lighting.ClockTime = 13.5
+Lighting.Brightness = 2.6
+Lighting.EnvironmentDiffuseScale = 0.5
+Lighting.EnvironmentSpecularScale = 0.4
+Lighting.OutdoorAmbient = Color3.fromRGB(140, 145, 160)
+Lighting.GlobalShadows = true
+
+local atmosfera = Instance.new("Atmosphere")
+atmosfera.Density = 0.32
+atmosfera.Offset = 0.25
+atmosfera.Glare = 0.2
+atmosfera.Haze = 1.6
+atmosfera.Parent = Lighting
+
+local bloom = Instance.new("BloomEffect")
+bloom.Intensity = 0.6
+bloom.Size = 32
+bloom.Threshold = 1.2
+bloom.Parent = Lighting
+
+local rayos = Instance.new("SunRaysEffect")
+rayos.Intensity = 0.15
+rayos.Spread = 0.6
+rayos.Parent = Lighting
+
+local nubes = Instance.new("Clouds")
+nubes.Cover = 0.55
+nubes.Density = 0.4
+nubes.Parent = workspace.Terrain
+
+-- ======================= HELPERS DE PELIGRO/MOVIMIENTO ==================== --
+local REBOTE_COOL = {}
+
+local function registrarMuerte(p)
+	p.Touched:Connect(function(hit)
+		local plr = playerFromHit(hit)
+		if not plr then return end
+		local char = plr.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum and hum.Health > 0 then
+			local ahora = os.clock()
+			local anterior = DEATHCOOL[plr]
+			if not anterior or ahora - anterior > 0.6 then
+				DEATHCOOL[plr] = ahora
+				hum.Health = 0
+				sonidoEn(char and char:FindFirstChild("HumanoidRootPart"), SND.death, 0.7)
+			end
+		end
+	end)
+end
+
+local function letal(cx, cy, cz, sx, sy, sz, color, props)
+	local t = {
+		Size = Vector3.new(sx, sy, sz),
+		CFrame = CFrame.new(cx, cy, cz),
+		Color = color or PALETTE.lava,
+		Material = Enum.Material.Neon,
+	}
+	if props then
+		for k, v in pairs(props) do t[k] = v end
+	end
+	local p = part(t)
+	registrarMuerte(p)
+	return p
+end
+
+-- Barras giratorias que hay que saltar (se mueven en el bucle principal)
+local function barraGiratoria(cx, cy, cz, largo, velocidad, color)
+	local bar = block(cx, cy, cz, largo, 1.5, 3, color, { Material = Enum.Material.Neon })
+	registrarMuerte(bar)
+	table.insert(ROTATORS, { part = bar, pivot = CFrame.new(cx, cy, cz), speed = velocidad })
+	return bar
+end
+
+-- Martillos pendulares colosales
+local function martillo(pivotCF, largo, maxAng, velocidad, fase, color)
+	local esf = part({
+		Size = Vector3.new(7, 7, 7),
+		Shape = Enum.PartType.Ball,
+		CFrame = pivotCF * CFrame.new(-largo, 0, 0),
+		Color = color or PALETTE.naranja,
+		Material = Enum.Material.Neon,
+	})
+	registrarMuerte(esf)
+	table.insert(PENDULUMS, {
+		part = esf, pivot = pivotCF, len = largo,
+		maxA = maxAng, w = velocidad, phase = fase,
+	})
+end
+
+-- Plataforma móvil que SÍ transporta al jugador (AlignPosition + ancla tween)
+local function rodeableMover(cf, size, eje, rango, periodo, desfase)
+	local plat = part({
+		Size = size, CFrame = cf, Color = PALETTE.cian,
+		Anchored = false,
+		CustomPhysicalProperties = PhysicalProperties.new(0.7, 1, 0.5, 5, 1),
+	})
+	pcall(function() plat:SetNetworkOwner(nil) end)
+	local a0 = Instance.new("Attachment")
+	a0.Parent = plat
+	local ancla = part({
+		Size = Vector3.new(0.4, 0.4, 0.4), CFrame = cf,
+		Transparency = 1, CanCollide = false, CanQuery = false,
+	})
+	local a1 = Instance.new("Attachment")
+	a1.Parent = ancla
+	local ap = Instance.new("AlignPosition")
+	ap.Attachment0 = a0
+	ap.Attachment1 = a1
+	ap.MaxForce = 200000
+	ap.Responsiveness = 18
+	ap.Parent = plat
+	local info = TweenInfo.new(periodo, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true, desfase or 0)
+	TweenService:Create(ancla, info, { CFrame = cf * CFrame.new(eje * rango) }):Play()
+	return plat
+end
+
+-- Disco giratorio sobre el que puedes caminar (HingeConstraint tipo motor)
+local function discoGiratorio(cf, sx, sz, velocidad, color)
+	local eje = part({
+		Size = Vector3.new(1, 2, 1), CFrame = cf,
+		Transparency = 1, CanCollide = false, CanQuery = false,
+	})
+	local disco = part({
+		Size = Vector3.new(sx, 1, sz), CFrame = cf,
+		Color = color or PALETTE.morado, Material = Enum.Material.Neon,
+		Anchored = false,
+		CustomPhysicalProperties = PhysicalProperties.new(0.7, 1, 0.5, 5, 1),
+	})
+	pcall(function() disco:SetNetworkOwner(nil) end)
+	local a0 = Instance.new("Attachment")
+	a0.Axis = Vector3.new(0, 1, 0)
+	a0.Parent = eje
+	local a1 = Instance.new("Attachment")
+	a1.Axis = Vector3.new(0, 1, 0)
+	a1.Parent = disco
+	local hinge = Instance.new("HingeConstraint")
+	hinge.Attachment0 = a0
+	hinge.Attachment1 = a1
+	hinge.ActuatorType = Enum.ActuatorType.Motor
+	hinge.MotorMaxTorque = 1000000
+	hinge.AngularVelocity = velocidad
+	hinge.Parent = eje
+	return disco
+end
+
+-- Checkpoint (loseta que guarda tu progreso)
+local function padCheckpoint(n, x, topY, z)
+	local col = CHECK_COLORS[((n - 1) % #CHECK_COLORS) + 1]
+	local p = plataforma(x, topY, z, 12, 12, col, { Material = Enum.Material.Neon })
+	block(x, topY + 1.2, z, 13.5, 0.6, 13.5, PALETTE.blanco, {
+		Transparency = 0.35, CanCollide = false, CanQuery = false,
+	})
+	cartel(p, "🚩 CHECKPOINT " .. n, 3, col)
+	CHECKPOINTS[n] = CFrame.new(x, topY, z)
+	p.Touched:Connect(function(hit)
+		local plr = playerFromHit(hit)
+		if plr and setStage then setStage(plr, n) end
+	end)
+	return p
+end
+
+-- Loseta de rebote (trampolín / lanzamiento)
+local function padRebote(x, topY, z, vel, color, texto)
+	local p = block(x, topY + 0.05, z, 10, 1.2, 10, color, { Material = Enum.Material.Neon })
+	if texto then
+		cartel(p, texto, 2.6, color)
+	end
+	p.Touched:Connect(function(hit)
+		local plr = playerFromHit(hit)
+		if not plr then return end
+		local char = plr.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local ahora = os.clock()
+			local ult = REBOTE_COOL[plr]
+			if not ult or ahora - ult > 0.4 then
+				REBOTE_COOL[plr] = ahora
+				hrp.AssemblyLinearVelocity = vel
+				sonidoEn(hrp, SND.whoosh, 0.5)
+			end
+		end
+	end)
+	return p
+end
+
+local function velocidadBase(plr)
+	local data = PDATA[plr]
+	return CONFIG.SPEED_BASE + ((data and data.SpeedLv) or 0) * CONFIG.SPEED_PER_LEVEL
+end
+
+-- Loseta de turbo (velocidad temporal)
+local function padTurbo(x, topY, z)
+	local p = plataforma(x, topY, z, 10, 10, PALETTE.amarillo, { Material = Enum.Material.Neon })
+	cartel(p, "💨 ¡TURBO!", 2.6, PALETTE.amarillo)
+	p.Touched:Connect(function(hit)
+		local plr = playerFromHit(hit)
+		if not plr then return end
+		local data = PDATA[plr]
+		local char = plr.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if data and hum and hum.Health > 0 then
+			local ahora = os.clock()
+			if ahora > (data.__turboHasta or 0) then
+				data.__turboHasta = ahora + 6
+				hum.WalkSpeed = velocidadBase(plr) + 26
+				sonidoEn(char:FindFirstChild("HumanoidRootPart"), SND.whoosh, 0.4, 1.2)
+				toast(plr, "💨 ¡Turbo por 6 segundos!", 2)
+				task.delay(6, function()
+					local d2 = PDATA[plr]
+					if d2 and os.clock() >= (d2.__turboHasta or 0) - 0.1 then
+						local h2 = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+						if h2 then
+							h2.WalkSpeed = velocidadBase(plr)
+						end
+					end
+				end)
+			end
+		end
+	end)
+	return p
+end
+
+-- Zona letal que se enciende y apaga (advertencia por color)
+local function zonaPulso(x, topY, z, periodo, esperaInicial)
+	local p = plataforma(x, topY, z, 2, 12, PALETTE.rojo, { Material = Enum.Material.Neon })
+	registrarMuerte(p)
+	task.spawn(function()
+		if esperaInicial and esperaInicial > 0 then
+			task.wait(esperaInicial)
+		end
+		while p.Parent do
+			p.CanTouch = true
+			p.Color = PALETTE.rojo
+			task.wait(periodo * 0.5)
+			p.CanTouch = false
+			p.Color = Color3.fromRGB(80, 60, 60)
+			task.wait(periodo * 0.5)
+		end
+	end)
+	return p
+end
+
+local function zoneZ(i)
+	return CONFIG.EXIT_Z - (i - 1) * CONFIG.STAGE_LEN
+end
+
+-- ================================ LOBBY ================================== --
+local BASE_Y = CONFIG.BASE_Y
+
+plataforma(0, BASE_Y, 0, 140, 140, PALETTE.pasto, { Material = Enum.Material.Grass })
+block(0, BASE_Y - 5.5, 0, 136, 10, 136, Color3.fromRGB(120, 85, 60), { Material = Enum.Material.Slate })
+
+-- Barandas del lobby (dejan un hueco de salida hacia las etapas)
+block(0, BASE_Y + 1, 70, 140, 2, 2, PALETTE.cian, { Material = Enum.Material.Neon })
+block(-70, BASE_Y + 1, 0, 2, 2, 140, PALETTE.cian, { Material = Enum.Material.Neon })
+block(70, BASE_Y + 1, 0, 2, 2, 140, PALETTE.cian, { Material = Enum.Material.Neon })
+block(-40, BASE_Y + 1, -70, 60, 2, 2, PALETTE.cian, { Material = Enum.Material.Neon })
+block(40, BASE_Y + 1, -70, 60, 2, 2, PALETTE.cian, { Material = Enum.Material.Neon })
+
+local spawnLoc = Instance.new("SpawnLocation")
+spawnLoc.Size = Vector3.new(12, 1, 12)
+spawnLoc.CFrame = CFrame.new(0, BASE_Y + 0.5, 20)
+spawnLoc.Color = PALETTE.azul
+spawnLoc.Material = Enum.Material.Neon
+spawnLoc.Anchored = true
+spawnLoc.TopSurface = Enum.SurfaceType.Smooth
+spawnLoc.Duration = 0
+spawnLoc.Parent = MAP
+CHECKPOINTS[1] = CFrame.new(0, BASE_Y + 1, 20)
+
+-- Arco de entrada con el título
+block(-12, BASE_Y + 9, -58, 3, 18, 3, PALETTE.morado, { Material = Enum.Material.Neon })
+block(12, BASE_Y + 9, -58, 3, 18, 3, PALETTE.morado, { Material = Enum.Material.Neon })
+block(0, BASE_Y + 19, -58, 30, 3, 3, PALETTE.morado, { Material = Enum.Material.Neon })
+-- Cartel gigante con el nombre del juego sobre el arco
+local pilarCartel = part({
+	Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(0, BASE_Y + 23, -58),
+	Transparency = 1, CanCollide = false, CanQuery = false,
+})
+cartel(pilarCartel, CONFIG.GAME_NAME, 6, Color3.fromRGB(255, 220, 60), Vector3.new(0, 4, 0), 250)
+
+-- Tapete de salida
+local tapete = plataforma(0, BASE_Y, -40, 20, 8, PALETTE.amarillo, { Material = Enum.Material.Neon })
+cartel(tapete, "⬆ ¡A LA AVENTURA!", 2.6, PALETTE.amarillo)
+
+-- ================== TIENDA Y PORTALES DEL LOBBY =========================== --
+local function padTienda(x, topY, z, color, texto, alTocar)
+	local p = plataforma(x, topY, z, 8, 8, color, { Material = Enum.Material.Neon })
+	local bb, lbl = cartel(p, texto, 2.4, color, Vector3.new(0, 3.5, 0))
+	p.Touched:Connect(function(hit)
+		local plr = playerFromHit(hit)
+		if plr then
+			alTocar(plr, lbl)
+		end
+	end)
+	return p
+end
+
+-- Estelas (lasetas de colores en fila derecha)
+local ESTELA_PADS = { "fuego", "hielo", "veneno", "estrellas", "rayo", "arcoiris" }
+local PAD_COL = {
+	fuego = PALETTE.naranja, hielo = PALETTE.cian, veneno = PALETTE.verde,
+	estrellas = PALETTE.amarillo, rayo = PALETTE.rosa, arcoiris = PALETTE.morado,
+}
+for i, id in ipairs(ESTELA_PADS) do
+	local def = TRAIL_POR_ID[id]
+	padTienda(44, BASE_Y, 36 - (i - 1) * 12, PAD_COL[id],
+		def.nombre .. "\n" .. def.costo .. "⭐", function(plr)
+			comprarEstela(plr, def)
+		end)
+end
+padTienda(44, BASE_Y, -36, PALETTE.oro, "🏆 Campeón\n¡Gana el obby!", function(plr)
+	comprarEstela(plr, TRAIL_POR_ID.campeon)
+end)
+
+-- Mejoras de salto y velocidad
+padTienda(58, BASE_Y, 12, PALETTE.azul, "🦘 Mejora de Salto\n" .. CONFIG.JUMP_COST .. "⭐", function(plr)
+	comprarMejoraSalto(plr)
+end)
+padTienda(58, BASE_Y, 0, PALETTE.rosa, "👟 Botas de Velocidad\n" .. CONFIG.SPEED_COST .. "⭐", function(plr)
+	comprarMejoraVelocidad(plr)
+end)
+
+-- Loseta VIP
+padTienda(58, BASE_Y, -12, PALETTE.oro, "👑 Zona VIP", function(plr)
+	reclamarVIP(plr)
+end)
+
+-- Cofre de recompensa diaria (ProximityPrompt: mantén E / toca)
+local cofre = block(-50, BASE_Y + 2.5, 30, 6, 5, 6, PALETTE.oro, { Material = Enum.Material.Neon })
+block(-50, BASE_Y + 0.5, 30, 7, 1, 7, Color3.fromRGB(150, 100, 30))
+cartel(cofre, "🎁 RECOMPENSA DIARIA", 2.4, PALETTE.oro, Vector3.new(0, 4.5, 0))
+local prompt = Instance.new("ProximityPrompt")
+prompt.ActionText = "Reclamar"
+prompt.ObjectText = "Cofre Diario"
+prompt.HoldDuration = 0.5
+prompt.MaxActivationDistance = 10
+prompt.Parent = cofre
+prompt.Triggered:Connect(function(plr)
+	reclamarDiario(plr)
+end)
+
+-- Portales de utilidad
+padTienda(-50, BASE_Y, 10, PALETTE.morado, "🟪 SALTAR ETAPA\n" .. CONFIG.SKIP_COST .. "⭐", function(plr)
+	saltarEtapa(plr)
+end)
+padTienda(-50, BASE_Y, -6, PALETTE.verde, "🟢 IR A MI CHECKPOINT", function(plr)
+	irACheckpoint(plr)
+end)
+local padReset = plataforma(-50, BASE_Y, -22, 8, 8, PALETTE.rojo, { Material = Enum.Material.Neon })
+cartel(padReset, "🔄 REINICIAR\nAVENTURA", 2.4, PALETTE.rojo, Vector3.new(0, 3.5, 0))
+padReset.Touched:Connect(function(hit)
+	local plr = playerFromHit(hit)
+	if plr then
+		reiniciarAventura(plr)
+	end
+end)
+
+-- Señal de estadísticas del servidor (se actualiza en el bucle principal)
+local postStats = block(-62, BASE_Y + 4, 20, 1, 8, 6, PALETTE.gris)
+local _, lblStats = cartel(postStats, "", 5.5, PALETTE.blanco, Vector3.new(0, 6.5, 0), 120)
+lblStats.Text = "Cargando..."
+
+-- ===================== DECORACIÓN: ABISMO E ISLAS ========================= --
+letal(0, CONFIG.KILL_Y - 6, -1100, 900, 4, 3400, Color3.fromRGB(120, 20, 10))
+
+math.randomseed(42)
+for i = 1, 14 do
+	local x = math.random(-320, 320)
+	local z = math.random(-2150, 120)
+	local y = math.random(BASE_Y - 35, BASE_Y + 45)
+	if math.abs(x) > 100 or z > 80 then
+		local t = math.random(18, 42)
+		local isla = plataforma(x, y, z, t, t, PALETTE.pasto, { Material = Enum.Material.Grass })
+		block(x, y - 3.5, z, t - 4, 6, t - 4, Color3.fromRGB(110, 80, 55), { Material = Enum.Material.Slate })
+		local arbolT = math.random(4, 7)
+		block(x, y + arbolT, z, 1.6, arbolT * 2, 1.6, Color3.fromRGB(90, 60, 40))
+		block(x, y + arbolT * 2 + 2, z, 6, 4, 6, Color3.fromRGB(50, 160, 70), { Material = Enum.Material.Grass })
+	end
+end
+
+-- ============================= ETAPAS 1-8 ================================= --
+local B = BASE_Y
+
+local function conectores(i)
+	local z0 = zoneZ(i)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 110, 14, 10, PALETTE.grisClaro)
+end
+
+-- ETAPA 1: Primeros Saltos
+local function etapa1()
+	local z0 = zoneZ(1)
+	conectores(1)
+	letal(0, 92, z0 - 58, 60, 2, 116, PALETTE.lava)
+	local xs = { 0, 6, -6, 6, -6, 0 }
+	for k = 1, 6 do
+		plataforma(xs[k], B, z0 - 18 - (k - 1) * 16, 10, 10,
+			CHECK_COLORS[(k % #CHECK_COLORS) + 1], { Material = Enum.Material.Neon })
+	end
+end
+
+-- ETAPA 2: Plataformas Viajeras (móviles que te transportan)
+local function etapa2()
+	local z0 = zoneZ(2)
+	conectores(2)
+	letal(0, 92, z0 - 58, 70, 2, 116, PALETTE.lava)
+	plataforma(0, B, z0 - 8, 14, 8, PALETTE.grisClaro)
+	rodeableMover(CFrame.new(0, B - 0.5, z0 - 28), Vector3.new(12, 1, 12), Vector3.new(1, 0, 0), 14, 4, 0)
+	plataforma(0, B, z0 - 42, 10, 10, PALETTE.grisClaro)
+	rodeableMover(CFrame.new(0, B - 0.5, z0 - 56), Vector3.new(12, 1, 12), Vector3.new(1, 0, 0), 14, 4, 1.3)
+	plataforma(0, B, z0 - 70, 10, 10, PALETTE.grisClaro)
+	rodeableMover(CFrame.new(0, B - 0.5, z0 - 84), Vector3.new(12, 1, 12), Vector3.new(1, 0, 0), 14, 4, 2.6)
+	plataforma(0, B, z0 - 96, 8, 8, PALETTE.grisClaro)
+end
+
+-- ETAPA 3: Hélices Mortales (barras que giran y hay que saltar)
+local function etapa3()
+	local z0 = zoneZ(3)
+	letal(0, 92, z0 - 58, 26, 2, 112, PALETTE.lava)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 58, 18, 108, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 110, 14, 10, PALETTE.grisClaro)
+	local zs = { 22, 44, 66, 88 }
+	for k, off in ipairs(zs) do
+		block(0, B + 3, z0 - off, 1.5, 6, 1.5, PALETTE.morado, { Material = Enum.Material.Neon })
+		local dir = (k % 2 == 0) and -1 or 1
+		barraGiratoria(0, B + 2, z0 - off, 26, dir * (2.1 + 0.2 * k), (k % 2 == 0) and PALETTE.rojo or PALETTE.morado)
+	end
+end
+
+-- ETAPA 4: Río de Lava (puente estrecho + zonas que se encienden y apagan)
+local function etapa4()
+	local z0 = zoneZ(4)
+	letal(0, 92, z0 - 58, 70, 2, 114, PALETTE.lava)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	local segs = { { 0, 10 }, { 5, 24 }, { 10, 38 }, { 5, 52 }, { 0, 66 }, { -6, 80 }, { -10, 94 }, { -5, 106 } }
+	for k, s in ipairs(segs) do
+		if k == 4 or k == 6 then
+			zonaPulso(s[1], B, z0 - s[2], 3, (k == 6) and 1.5 or 0)
+		else
+			block(s[1], B - 0.5, z0 - s[2], 2, 1, 16, PALETTE.madera, { Material = Enum.Material.WoodPlanks })
+		end
+	end
+	plataforma(0, B, z0 - 112, 12, 10, PALETTE.grisClaro)
+end
+
+-- ETAPA 5: Plataformas Fantasma (desaparecen y reaparecen)
+local function etapa5()
+	local z0 = zoneZ(5)
+	letal(0, 92, z0 - 58, 60, 2, 114, PALETTE.morado)
+	conectores(5)
+	local xs = { 0, 5, -5, 0, 5, -5, 0, 5, -5, 0 }
+	for k = 1, 10 do
+		local p = plataforma(xs[k], B, z0 - 16 - (k - 1) * 14, 8, 8, PALETTE.blanco, { Material = Enum.Material.Neon })
+		local fase = k * 0.5
+		task.spawn(function()
+			task.wait(fase)
+			while p.Parent do
+				p.Transparency = 0
+				p.CanCollide = true
+				p.CanTouch = true
+				task.wait(2.4)
+				for i = 1, 3 do
+					p.Transparency = 0.5
+					task.wait(0.15)
+					p.Transparency = 0
+					task.wait(0.15)
+				end
+				p.Transparency = 1
+				p.CanCollide = false
+				p.CanTouch = false
+				task.wait(1.6)
+			end
+		end)
+	end
+end
+
+-- ETAPA 6: Cintas Cósmicas (cintas transportadoras)
+local function etapa6()
+	local z0 = zoneZ(6)
+	letal(0, 92, z0 - 58, 70, 2, 116, PALETTE.lava)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	local beltA = plataforma(0, B, z0 - 23, 12, 30, PALETTE.azul, { Material = Enum.Material.Fabric })
+	CONVEYORS[beltA] = Vector3.new(0, 0, -22)
+	cartel(beltA, "⬆⬆⬆", 2.5, PALETTE.cian)
+	local beltB = plataforma(0, B, z0 - 59, 12, 30, PALETTE.naranja, { Material = Enum.Material.Fabric })
+	CONVEYORS[beltB] = Vector3.new(0, 0, 14)
+	cartel(beltB, "⚠ ¡TE EMPUJA ATRÁS!", 2.5, PALETTE.naranja)
+	local beltC = plataforma(0, B, z0 - 95, 12, 30, PALETTE.amarillo, { Material = Enum.Material.Fabric })
+	CONVEYORS[beltC] = Vector3.new(16, 0, 0)
+	cartel(beltC, "⚠ ¡TE EMPUJA AL COSTADO!", 2.5, PALETTE.amarillo)
+end
+
+-- ETAPA 7: Trampolines Lunares
+local function etapa7()
+	local z0 = zoneZ(7)
+	letal(0, 88, z0 - 58, 70, 2, 114, PALETTE.morado)
+	plataforma(0, B, z0 - 8, 14, 8, PALETTE.grisClaro)
+	padRebote(0, B, z0 - 20, Vector3.new(0, 70, -45), PALETTE.verde, "⬆ ¡SALTA!")
+	plataforma(0, B, z0 - 52, 12, 12, PALETTE.grisClaro)
+	padRebote(0, B, z0 - 56, Vector3.new(0, 80, -40), PALETTE.verde, "⬆⬆ ¡MÁS FUERTE!")
+	plataforma(0, B + 8, z0 - 84, 12, 12, PALETTE.grisClaro)
+	padRebote(0, B + 8, z0 - 88, Vector3.new(0, 45, -30), PALETTE.verde, "⬆")
+	plataforma(0, B, z0 - 108, 12, 10, PALETTE.grisClaro)
+end
+
+-- ETAPA 8: Martillos Colosales
+local function etapa8()
+	local z0 = zoneZ(8)
+	letal(0, 92, z0 - 58, 24, 2, 112, PALETTE.lava)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 58, 14, 112, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 110, 14, 10, PALETTE.grisClaro)
+	for k = 0, 3 do
+		local zoff = 20 + k * 25
+		block(0, B + 18, z0 - zoff, 1, 2, 1, PALETTE.gris)
+		martillo(CFrame.new(0, B + 18, z0 - zoff), 13, 0.96, 2.0, k * 1.57,
+			(k % 2 == 0) and PALETTE.naranja or PALETTE.rojo)
+	end
+end
+
+local CONSTRUCTORES = { etapa1, etapa2, etapa3, etapa4, etapa5, etapa6, etapa7, etapa8 }
+for i = 1, 8 do
+	CONSTRUCTORES[i]()
+end
+
+-- Checkpoints 2..9 (los del resto se crean con las etapas 9-15)
+for n = 2, 9 do
+	padCheckpoint(n, 0, B, zoneZ(n) + 10)
+end
+
+-- ============================= ETAPAS 9-15 ================================ --
+-- (B ya está definido en la parte del lobby como CONFIG.BASE_Y)
+
+-- ETAPA 9: Cuerda Floja (vigas finas + barrera giratoria)
+local function etapa9()
+	local z0 = zoneZ(9)
+	letal(0, 90, z0 - 58, 60, 2, 114, Color3.fromRGB(40, 30, 90), { Transparency = 0.2 })
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 110, 14, 10, PALETTE.grisClaro)
+	block(-6, B - 0.5, z0 - 58, 2, 1, 100, PALETTE.madera, { Material = Enum.Material.WoodPlanks })
+	block(6, B - 0.5, z0 - 58, 2, 1, 100, PALETTE.madera, { Material = Enum.Material.WoodPlanks })
+	plataforma(0, B, z0 - 40, 12, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 76, 12, 8, PALETTE.grisClaro)
+	barraGiratoria(0, B + 2, z0 - 40, 16, 2.6, PALETTE.rojo)
+end
+
+-- ETAPA 10: Río Helado (hielo resbaladizo)
+local function etapa10()
+	local z0 = zoneZ(10)
+	letal(0, 92, z0 - 56, 70, 2, 116, Color3.fromRGB(20, 40, 160))
+	local hieloProps = { Material = Enum.Material.Ice, Color = PALETTE.hielo,
+		CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.02, 0.5, 1, 1) }
+	local p1 = plataforma(0, B, z0 - 14, 24, 24, nil, hieloProps)
+	cartel(p1, "❄️ ¡RESBALA!", 2.6, PALETTE.cian)
+	plataforma(8, B, z0 - 44, 18, 18, nil, hieloProps)
+	plataforma(-10, B, z0 - 72, 18, 18, nil, hieloProps)
+	plataforma(0, B, z0 - 98, 20, 20, nil, hieloProps)
+end
+
+-- ETAPA 11: Salto Lunar (impulsos gigantes entre estrellas)
+local function etapa11()
+	local z0 = zoneZ(11)
+	letal(0, 88, z0 - 58, 70, 2, 114, Color3.fromRGB(15, 15, 70))
+	plataforma(0, B, z0 - 8, 14, 8, PALETTE.grisClaro)
+	padRebote(0, B, z0 - 16, Vector3.new(0, 85, -55), PALETTE.cian, "🌕 ¡A LA LUNA!")
+	plataforma(0, B, z0 - 64, 16, 16, PALETTE.grisClaro)
+	padRebote(0, B, z0 - 72, Vector3.new(0, 85, -55), PALETTE.cian, "🚀 ¡SEGUNDO IMPULSO!")
+	math.randomseed(7)
+	for i = 1, 30 do
+		block(math.random(-80, 80), math.random(B + 15, B + 45), math.random(z0 - 115, z0 - 10),
+			1.5, 1.5, 1.5, (i % 2 == 0) and PALETTE.amarillo or PALETTE.blanco, {
+				Material = Enum.Material.Neon, CanCollide = false, CanQuery = false,
+			})
+	end
+end
+
+-- ETAPA 12: Autopista Turbo (losetas de velocidad + paredes letales que cruzan)
+local function etapa12()
+	local z0 = zoneZ(12)
+	letal(0, 92, z0 - 58, 30, 2, 112, PALETTE.lava)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 58, 16, 108, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 110, 14, 10, PALETTE.grisClaro)
+	padTurbo(0, B, z0 - 18)
+	padTurbo(0, B, z0 - 46)
+	padTurbo(0, B, z0 - 74)
+	for k, zoff in ipairs({ 30, 58, 86 }) do
+		local w = letal(-10, B + 4, z0 - zoff, 8, 8, 2, PALETTE.rojo)
+		local info = TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true, (k - 1) * 0.9)
+		TweenService:Create(w, info, { CFrame = CFrame.new(10, B + 4, z0 - zoff) }):Play()
+	end
+end
+
+-- ETAPA 13: Pistones Aplastantes
+local function etapa13()
+	local z0 = zoneZ(13)
+	plataforma(0, B, z0 - 2, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 58, 16, 112, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 110, 14, 10, PALETTE.grisClaro)
+	block(-9, B + 4, z0 - 58, 2, 8, 112, PALETTE.gris)
+	block(9, B + 4, z0 - 58, 2, 8, 112, PALETTE.gris)
+	for k, zoff in ipairs({ 14, 34, 54, 74, 94 }) do
+		local p = letal(-14, B + 3.5, z0 - zoff, 12, 7, 6, PALETTE.rojo)
+		local info = TweenInfo.new(3.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true, (k - 1) * 0.65)
+		TweenService:Create(p, info, { CFrame = CFrame.new(14, B + 3.5, z0 - zoff) }):Play()
+		block(-9, B + 3.5, z0 - zoff, 3, 7, 7, PALETTE.gris) -- carcasa
+		block(9, B + 3.5, z0 - zoff, 3, 7, 7, PALETTE.gris)
+	end
+end
+
+-- ETAPA 14: Espiral Celeste (espiral ascendente con barras giratorias)
+local function etapa14()
+	local z0 = zoneZ(14)
+	plataforma(0, B, z0 - 8, 14, 8, PALETTE.grisClaro)
+	plataforma(0, B, z0 - 16, 10, 8, PALETTE.grisClaro)
+	local cx, cz = 0, z0 - 45
+	part({ Shape = Enum.PartType.Cylinder, Size = Vector3.new(48, 8, 8),
+		CFrame = CFrame.new(cx, B + 16, cz) * CFrame.Angles(0, 0, math.pi / 2),
+		Color = PALETTE.morado, Material = Enum.Material.Neon })
+	for k = 1, 14 do
+		local ang = k * 0.5236
+		plataforma(cx + 15 * math.sin(ang), B + k * 2.2, cz + 15 * math.cos(ang),
+			7, 7, (k % 2 == 0) and PALETTE.cian or PALETTE.morado, { Material = Enum.Material.Neon })
+	end
+	barraGiratoria(cx, B + 17, cz, 34, 1.8, PALETTE.rojo)
+	barraGiratoria(cx, B + 26, cz, 34, -2.2, PALETTE.rojo)
+	local yTopo = B + 30.8
+	plataforma(4, yTopo, z0 - 46, 12, 10, PALETTE.grisClaro)
+	plataforma(0, yTopo, z0 - 64, 12, 16, PALETTE.grisClaro)
+	plataforma(0, yTopo, z0 - 84, 12, 16, PALETTE.grisClaro)
+	plataforma(0, yTopo, z0 - 104, 12, 12, PALETTE.grisClaro)
+end
+
+-- ETAPA 15: Torre del Cielo (gran espiral final hasta el portal de la victoria)
+local function etapa15()
+	local z0 = zoneZ(15)
+	letal(0, 90, z0 - 58, 60, 2, 116, PALETTE.lava)
+	plataforma(0, B + 31, z0 - 2, 14, 12, PALETTE.grisClaro)
+	local cx, cz = 0, z0 - 30
+	part({ Shape = Enum.PartType.Cylinder, Size = Vector3.new(76, 16, 16),
+		CFrame = CFrame.new(cx, B + 34, cz) * CFrame.Angles(0, 0, math.pi / 2),
+		Color = PALETTE.cian, Material = Enum.Material.Neon })
+	for k = 1, 16 do
+		local ang = k * 0.4538
+		plataforma(cx + 20 * math.sin(ang), B + 31 + k * 2.4, cz + 20 * math.cos(ang),
+			8, 8, (k % 2 == 0) and PALETTE.blanco or PALETTE.cian, { Material = Enum.Material.Neon })
+	end
+	barraGiratoria(cx, B + 48.5, cz, 46, 1.6, PALETTE.rojo)
+	barraGiratoria(cx, B + 57.5, cz, 46, -1.9, PALETTE.rojo)
+	plataforma(0, B + 72, cz, 10, 10, PALETTE.oro, { Material = Enum.Material.Neon })
+	block(-4, B + 75.5, cz, 1.5, 7, 1.5, PALETTE.oro, { Material = Enum.Material.Neon })
+	block(4, B + 75.5, cz, 1.5, 7, 1.5, PALETTE.oro, { Material = Enum.Material.Neon })
+	block(0, B + 79.5, cz, 10, 1.5, 1.5, PALETTE.oro, { Material = Enum.Material.Neon })
+	local portal = block(0, B + 74.5, cz, 6, 6, 1, PALETTE.blanco, {
+		Material = Enum.Material.Neon, Transparency = 0.3, CanCollide = false,
+	})
+	cartel(portal, "🏆 ¡META!", 3, PALETTE.oro)
+	portal.Touched:Connect(function(hit)
+		local plr = playerFromHit(hit)
+		if plr and ganarPartida then
+			ganarPartida(plr)
+		end
+	end)
+end
+
+etapa9()
+etapa10()
+etapa11()
+etapa12()
+etapa13()
+etapa14()
+etapa15()
+
+-- Checkpoints 10..15 (el 15 está arriba de la torre de la etapa 14)
+for n = 10, 15 do
+	local topY = (n == 15) and (B + 31) or B
+	padCheckpoint(n, 0, topY, zoneZ(n) + 10)
+end
+
+-- ========================= ISLA DE CAMPEONES ============================== --
+local WIN = Vector3.new(0, 185, -2060)
+
+plataforma(WIN.X, WIN.Y, WIN.Z, 70, 60, PALETTE.pasto, { Material = Enum.Material.Grass })
+block(WIN.X, WIN.Y - 5.5, WIN.Z, 66, 10, 56, Color3.fromRGB(110, 80, 55), { Material = Enum.Material.Slate })
+block(WIN.X, WIN.Y + 1, WIN.Z + 30, 70, 2, 2, PALETTE.oro, { Material = Enum.Material.Neon })
+block(WIN.X, WIN.Y + 1, WIN.Z - 30, 70, 2, 2, PALETTE.oro, { Material = Enum.Material.Neon })
+block(WIN.X - 35, WIN.Y + 1, WIN.Z, 2, 2, 60, PALETTE.oro, { Material = Enum.Material.Neon })
+block(WIN.X + 35, WIN.Y + 1, WIN.Z, 2, 2, 60, PALETTE.oro, { Material = Enum.Material.Neon })
+
+-- Podio de campeones
+block(0, WIN.Y + 2.5, WIN.Z - 12, 8, 5, 8, PALETTE.oro, { Material = Enum.Material.Neon })
+block(-12, WIN.Y + 1.5, WIN.Z - 12, 8, 3, 8, PALETTE.grisClaro, { Material = Enum.Material.Neon })
+block(12, WIN.Y + 1, WIN.Z - 12, 8, 2, 8, Color3.fromRGB(200, 120, 60), { Material = Enum.Material.Neon })
+cartel(part({ Size = Vector3.new(1, 1, 1), CFrame = CFrame.new(0, WIN.Y + 9, WIN.Z - 12),
+	Transparency = 1, CanCollide = false, CanQuery = false }),
+	"🎖️ PODIO DE CAMPEONES", 3, PALETTE.oro, Vector3.new(0, 2, 0), 200)
+
+-- Tronos VIP
+block(-22, WIN.Y + 2, WIN.Z + 5, 6, 4, 6, PALETTE.oro, { Material = Enum.Material.Neon })
+block(-22, WIN.Y + 5.5, WIN.Z + 7.5, 6, 7, 1, PALETTE.oro, { Material = Enum.Material.Neon })
+block(22, WIN.Y + 2, WIN.Z + 5, 6, 4, 6, PALETTE.oro, { Material = Enum.Material.Neon })
+block(22, WIN.Y + 5.5, WIN.Z + 7.5, 6, 7, 1, PALETTE.oro, { Material = Enum.Material.Neon })
+
+-- Pad para volver al lobby
+padTienda(WIN.X, WIN.Y, WIN.Z + 15, PALETTE.azul, "🏠 VOLVER AL LOBBY", function(plr)
+	teleport(plr, CHECKPOINTS[1])
+	sonidoGlobal(SND.whoosh, 0.4)
+end)
+
+-- Confeti permanente
+local confetiAncla = part({
+	Size = Vector3.new(40, 1, 40), CFrame = CFrame.new(WIN.X, WIN.Y + 25, WIN.Z),
+	Transparency = 1, CanCollide = false, CanQuery = false,
+})
+local confeti = Instance.new("ParticleEmitter")
+confeti.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+confeti.Rate = 30
+confeti.Lifetime = NumberRange.new(4, 7)
+confeti.Speed = NumberRange.new(2, 6)
+confeti.SpreadAngle = Vector2.new(180, 180)
+confeti.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, PALETTE.rojo),
+	ColorSequenceKeypoint.new(0.25, PALETTE.amarillo),
+	ColorSequenceKeypoint.new(0.5, PALETTE.verde),
+	ColorSequenceKeypoint.new(0.75, PALETTE.cian),
+	ColorSequenceKeypoint.new(1, PALETTE.rosa),
+})
+confeti.LightEmission = 0.8
+confeti.Size = NumberSequence.new(1, 0.3)
+confeti.Parent = confetiAncla
+
+-- Fuegos artificiales cada 5 segundos
+task.spawn(function()
+	while true do
+		task.wait(5)
+		local colores = { PALETTE.rojo, PALETTE.amarillo, PALETTE.verde, PALETTE.cian, PALETTE.rosa, PALETTE.oro }
+		local col = colores[math.random(1, #colores)]
+		local fw = part({
+			Size = Vector3.new(2, 2, 2), Shape = Enum.PartType.Ball,
+			CFrame = CFrame.new(WIN.X + math.random(-25, 25), WIN.Y + 1, WIN.Z + math.random(-15, 15)),
+			Color = col, Material = Enum.Material.Neon,
+			Anchored = false, CanCollide = false,
+		})
+		fw.AssemblyLinearVelocity = Vector3.new(math.random(-15, 15), 85, math.random(-15, 15))
+		task.delay(1.1, function()
+			if not fw.Parent then return end
+			sonidoGlobal(SND.ping, 0.35, math.random(9, 13) / 10)
+			local burst = part({
+				Size = Vector3.new(1, 1, 1), CFrame = fw.CFrame,
+				Transparency = 1, CanCollide = false, CanQuery = false, Anchored = true,
+			})
+			local em = Instance.new("ParticleEmitter")
+			em.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+			em.Color = ColorSequence.new(col)
+			em.LightEmission = 1
+			em.Lifetime = NumberRange.new(0.6, 1.1)
+			em.Speed = NumberRange.new(18, 30)
+			em.SpreadAngle = Vector2.new(180, 180)
+			em.Size = NumberSequence.new(1.2, 0)
+			em.Parent = burst
+			em:Emit(80)
+			fw:Destroy()
+			task.delay(1.5, function() burst:Destroy() end)
+		end)
+		task.delay(2.5, function()
+			if fw.Parent then fw:Destroy() end
+		end)
+	end
+end)
+
+-- ========================= TABLEROS DE CLASIFICACIÓN ====================== --
+local BOARDS = {}
+
+local function crearTablero(cf, titulo, kind)
+	local p = part({
+		Size = Vector3.new(18, 10, 1), CFrame = cf,
+		Color = Color3.fromRGB(30, 30, 45), Material = Enum.Material.SmoothPlastic,
+	})
+	block(cf.X, cf.Y - 6.5, cf.Z, 2, 4, 2, PALETTE.gris)
+	local gui = Instance.new("SurfaceGui")
+	gui.Face = Enum.NormalId.Front
+	gui.CanvasSize = Vector2.new(720, 400)
+	gui.Parent = p
+	local t = Instance.new("TextLabel")
+	t.Size = UDim2.new(1, 0, 0.2, 0)
+	t.BackgroundColor3 = PALETTE.oro
+	t.Font = Enum.Font.FredokaOne
+	t.TextScaled = true
+	t.Text = titulo
+	t.TextColor3 = Color3.fromRGB(40, 30, 10)
+	t.Parent = gui
+	local marco = Instance.new("Frame")
+	marco.Size = UDim2.new(0.94, 0, 0.76, 0)
+	marco.Position = UDim2.new(0.03, 0, 0.22, 0)
+	marco.BackgroundTransparency = 1
+	marco.Parent = gui
+	local list = Instance.new("UIListLayout")
+	list.FillDirection = Enum.FillDirection.Vertical
+	list.Padding = UDim.new(0.01, 0)
+	list.SortOrder = Enum.SortOrder.LayoutOrder
+	list.Parent = marco
+	BOARDS[kind] = { marco = marco, titulo = t }
+	return p
+end
+
+crearTablero(CFrame.new(-62, B + 7, -30) * CFrame.Angles(0, math.pi / 2, 0), "🏆 TOP ETAPAS", "etapas")
+crearTablero(CFrame.new(-62, B + 7, -50) * CFrame.Angles(0, math.pi / 2, 0), "⭐ TOP PUNTOS", "puntos")
+crearTablero(CFrame.new(WIN.X + 36, WIN.Y + 7, WIN.Z) * CFrame.Angles(0, -math.pi / 2, 0), "🎖️ CAMPEONES", "campeones")
+
+local function lineaTablero(marco, texto, orden, color)
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 0.095, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextScaled = true
+	lbl.Text = texto
+	lbl.TextColor3 = color or Color3.new(1, 1, 1)
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.LayoutOrder = orden
+	lbl.Parent = marco
+end
+
+local function actualizarTablero(kind, lineas)
+	local b = BOARDS[kind]
+	if not b then return end
+	for _, hijo in ipairs(b.marco:GetChildren()) do
+		if hijo:IsA("TextLabel") then hijo:Destroy() end
+	end
+	if #lineas == 0 then
+		lineaTablero(b.marco, "Aún sin datos... ¡sé el primero! ✨", 1, Color3.fromRGB(180, 180, 200))
+		return
+	end
+	for i, linea in ipairs(lineas) do
+		local medalla = ""
+		if i == 1 then medalla = "🥇 " elseif i == 2 then medalla = "🥈 " elseif i == 3 then medalla = "🥉 " end
+		lineaTablero(b.marco, medalla .. linea, i, (i <= 3) and PALETTE.amarillo or Color3.new(1, 1, 1))
+	end
+end
+
+local function nombreDeUsuario(uid)
+	if NAME_CACHE[uid] then return NAME_CACHE[uid] end
+	local nombre = ("Jugador %d"):format(uid)
+	local ok, res = pcall(function() return Players:GetNameFromUserIdAsync(uid) end)
+	if ok and type(res) == "string" and #res > 0 then
+		nombre = res
+	end
+	NAME_CACHE[uid] = nombre
+	return nombre
+end
+
+local function actualizarTableroCampeones()
+	local lineas = {}
+	for i, nombre in ipairs(CHAMPS) do
+		table.insert(lineas, nombre)
+		if i >= 8 then break end
+	end
+	actualizarTablero("campeones", lineas)
+end
+actualizarTableroCampeones()
+
+-- ===================== GAMEPLAY: PROGRESO Y TIENDA ======================== --
+local SKIP_COOL, GO_COOL, MEJORA_COOL, WIN_COOL, RESET_PEND = {}, {}, {}, {}, {}
+
+function awardPoints(plr, cantidad, razon)
+	local data = PDATA[plr]
+	if not data then return end
+	local ls = plr:FindFirstChild("leaderstats")
+	local puntos = ls and ls:FindFirstChild("Puntos")
+	if not puntos then return end
+	puntos.Value = puntos.Value + cantidad
+	data.Points = puntos.Value
+	if razon then
+		toast(plr, razon, 2.5, PALETTE.amarillo)
+	end
+	refreshHUD(plr)
+end
+
+function setStage(plr, n)
+	local data = PDATA[plr]
+	if not data or n <= data.Stage then return end
+	data.Stage = n
+	local ls = plr:FindFirstChild("leaderstats")
+	if ls and ls:FindFirstChild("Etapa") then
+		ls.Etapa.Value = n
+	end
+	local bonus = CONFIG.POINTS_PER_STAGE
+	if data.VIP then
+		bonus = bonus + math.floor(bonus * 0.25)
+	end
+	awardPoints(plr, bonus, "✅ ¡Checkpoint " .. n .. "! +" .. bonus .. "⭐")
+	local char = plr.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.Health = hum.MaxHealth
+	end
+	sonidoEn(char and char:FindFirstChild("HumanoidRootPart"), SND.ping, 0.4, 1.2)
+	actualizarTag(plr)
+	refreshHUD(plr)
+	scheduleSave(plr)
+	if n == 8 then
+		globalToast("🎉 ¡" .. plr.DisplayName .. " llegó a la etapa 8!", PALETTE.cian)
+	elseif n == 12 then
+		globalToast("🎉 ¡" .. plr.DisplayName .. " llegó a la etapa 12!", PALETTE.verde)
+	elseif n == CONFIG.STAGES then
+		globalToast("🔥 ¡" .. plr.DisplayName .. " está en la ETAPA FINAL!", PALETTE.rojo, 4)
+	end
+end
+
+function victoria(plr)
+	local data = PDATA[plr]
+	if not data or not data.__gui then return end
+	local g = data.__gui.ganar
+	g.gTexto.Text = "Eres una leyenda, " .. plr.DisplayName .. "!\n\n"
+		.. "🏆 Victorias: " .. data.Wins .. "\n⭐ +" .. CONFIG.POINTS_WIN .. " puntos\n"
+		.. "🎨 Estela Campeón desbloqueada\n\n¡Fuegos artificiales en tu honor! 🎆"
+	g.Visible = true
+	task.delay(8, function()
+		if g and g.Parent then
+			g.Visible = false
+		end
+	end)
+end
+
+function ganarPartida(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	if data.Stage < CONFIG.STAGES then
+		toast(plr, "🏆 ¡Completa las " .. CONFIG.STAGES .. " etapas para ganar!", 3, PALETTE.amarillo)
+		return
+	end
+	local ahora = os.clock()
+	if WIN_COOL[plr] and ahora - WIN_COOL[plr] < 10 then return end
+	WIN_COOL[plr] = ahora
+	data.Wins = data.Wins + 1
+	TOTAL.wins = TOTAL.wins + 1
+	local ls = plr:FindFirstChild("leaderstats")
+	if ls and ls:FindFirstChild("Victorias") then
+		ls.Victorias.Value = data.Wins
+	end
+	if not data.Trails.campeon then
+		data.Trails.campeon = true
+		data.Equipped = "campeon"
+	end
+	table.insert(CHAMPS, 1, "👑 " .. plr.DisplayName)
+	if #CHAMPS > 8 then
+		table.remove(CHAMPS)
+	end
+	actualizarTableroCampeones()
+	teleport(plr, CFrame.new(0, WIN.Y + 2, WIN.Z + 12))
+	awardPoints(plr, CONFIG.POINTS_WIN, "🏆 ¡+" .. CONFIG.POINTS_WIN .. " por ganar!")
+	victoria(plr)
+	sonidoGlobal(SND.ping, 0.6)
+	task.delay(0.4, function() sonidoGlobal(SND.ping, 0.5, 1.3) end)
+	globalToast("🏆 ¡" .. plr.DisplayName .. " COMPLETÓ EL OBBY! ¡Felicidades! 🎉", PALETTE.oro, 5)
+	aplicarEstela(plr)
+	refreshHUD(plr)
+	actualizarTag(plr)
+	scheduleSave(plr)
+end
+
+function comprarMejoraSalto(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local ahora = os.clock()
+	if MEJORA_COOL[plr] and ahora - MEJORA_COOL[plr] < 1.5 then return end
+	MEJORA_COOL[plr] = ahora
+	local ls = plr:FindFirstChild("leaderstats")
+	local puntos = ls and ls:FindFirstChild("Puntos")
+	if not puntos then return end
+	if data.JumpLv >= CONFIG.JUMP_MAX_LEVEL then
+		toast(plr, "🦘 Salto al máximo (nivel " .. CONFIG.JUMP_MAX_LEVEL .. ")", 2.5)
+		return
+	end
+	if puntos.Value < CONFIG.JUMP_COST then
+		toast(plr, "Te faltan " .. (CONFIG.JUMP_COST - puntos.Value) .. "⭐ para el salto", 2.5, Color3.fromRGB(255, 120, 120))
+		return
+	end
+	puntos.Value = puntos.Value - CONFIG.JUMP_COST
+	data.Points = puntos.Value
+	data.JumpLv = data.JumpLv + 1
+	applyStats(plr)
+	sonidoGlobal(SND.buy, 0.4)
+	toast(plr, "🦘 ¡Salto nivel " .. data.JumpLv .. "! (+" .. CONFIG.JUMP_PER_LEVEL .. " altura)", 3, PALETTE.verde)
+	refreshHUD(plr)
+	scheduleSave(plr)
+end
+
+function comprarMejoraVelocidad(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local ahora = os.clock()
+	if MEJORA_COOL[plr] and ahora - MEJORA_COOL[plr] < 1.5 then return end
+	MEJORA_COOL[plr] = ahora
+	local ls = plr:FindFirstChild("leaderstats")
+	local puntos = ls and ls:FindFirstChild("Puntos")
+	if not puntos then return end
+	if data.SpeedLv >= CONFIG.SPEED_MAX_LEVEL then
+		toast(plr, "👟 Velocidad al máximo (nivel " .. CONFIG.SPEED_MAX_LEVEL .. ")", 2.5)
+		return
+	end
+	if puntos.Value < CONFIG.SPEED_COST then
+		toast(plr, "Te faltan " .. (CONFIG.SPEED_COST - puntos.Value) .. "⭐ para las botas", 2.5, Color3.fromRGB(255, 120, 120))
+		return
+	end
+	puntos.Value = puntos.Value - CONFIG.SPEED_COST
+	data.Points = puntos.Value
+	data.SpeedLv = data.SpeedLv + 1
+	applyStats(plr)
+	sonidoGlobal(SND.buy, 0.4)
+	toast(plr, "👟 ¡Velocidad nivel " .. data.SpeedLv .. "! (+" .. CONFIG.SPEED_PER_LEVEL .. " velocidad)", 3, PALETTE.rosa)
+	refreshHUD(plr)
+	scheduleSave(plr)
+end
+
+function reclamarDiario(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local hoy = math.floor(os.time() / 86400)
+	if data.LastDaily == hoy then
+		toast(plr, "🎁 Ya reclamaste hoy. ¡Vuelve mañana! (racha actual: " .. math.min(data.Streak, 7) .. ")", 3)
+		return
+	end
+	if data.LastDaily == hoy - 1 then
+		data.Streak = math.min(data.Streak + 1, 7)
+	else
+		data.Streak = 1
+	end
+	data.LastDaily = hoy
+	local reward = CONFIG.DAILY_BASE * data.Streak
+	if data.VIP then
+		reward = reward * 2
+	end
+	awardPoints(plr, reward, "🎁 Recompensa diaria x" .. data.Streak .. " ¡+" .. reward .. "⭐!")
+	sonidoGlobal(SND.buy, 0.4)
+	refreshHUD(plr)
+	scheduleSave(plr)
+end
+
+function saltarEtapa(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local ahora = os.clock()
+	if SKIP_COOL[plr] and ahora - SKIP_COOL[plr] < 3 then return end
+	SKIP_COOL[plr] = ahora
+	local ls = plr:FindFirstChild("leaderstats")
+	local puntos = ls and ls:FindFirstChild("Puntos")
+	if not puntos then return end
+	if data.Stage >= CONFIG.STAGES then
+		toast(plr, "🟪 ¡Ya estás en la última etapa!", 2.5)
+		return
+	end
+	if puntos.Value < CONFIG.SKIP_COST then
+		toast(plr, "Te faltan " .. (CONFIG.SKIP_COST - puntos.Value) .. "⭐ para saltar", 2.5, Color3.fromRGB(255, 120, 120))
+		return
+	end
+	puntos.Value = puntos.Value - CONFIG.SKIP_COST
+	data.Points = puntos.Value
+	data.Stage = data.Stage + 1
+	ls.Etapa.Value = data.Stage
+	teleport(plr, CHECKPOINTS[data.Stage])
+	sonidoGlobal(SND.whoosh, 0.4)
+	toast(plr, "🟪 ¡Ahora en la etapa " .. data.Stage .. "!", 3, PALETTE.morado)
+	actualizarTag(plr)
+	refreshHUD(plr)
+	scheduleSave(plr)
+end
+
+function irACheckpoint(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local ahora = os.clock()
+	if GO_COOL[plr] and ahora - GO_COOL[plr] < 3 then return end
+	GO_COOL[plr] = ahora
+	local cp = CHECKPOINTS[data.Stage] or CHECKPOINTS[1]
+	teleport(plr, cp)
+	sonidoGlobal(SND.whoosh, 0.35)
+	toast(plr, "🟢 ¡De viaje a la etapa " .. data.Stage .. "!", 2)
+end
+
+function reiniciarAventura(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	local ahora = os.clock()
+	if RESET_PEND[plr] and ahora - RESET_PEND[plr] < 6 then
+		RESET_PEND[plr] = nil
+		data.Stage = 1
+		local ls = plr:FindFirstChild("leaderstats")
+		if ls and ls:FindFirstChild("Etapa") then
+			ls.Etapa.Value = 1
+		end
+		teleport(plr, CHECKPOINTS[1])
+		toast(plr, "🔄 ¡Aventura reiniciada desde la etapa 1!", 3)
+		actualizarTag(plr)
+		refreshHUD(plr)
+		scheduleSave(plr)
+	else
+		RESET_PEND[plr] = ahora
+		toast(plr, "⚠️ Pisa de nuevo para REINICIAR (perderás tu checkpoint actual)", 4, PALETTE.rojo)
+	end
+end
+
+function reclamarVIP(plr)
+	local data = PDATA[plr]
+	if not data then return end
+	if CONFIG.VIP_PASS_ID <= 0 then
+		toast(plr, "👑 VIP aún no está configurado: el creador debe poner su Game Pass ID en el script", 4, PALETTE.oro)
+		return
+	end
+	if data.VIP then
+		toast(plr, "👑 ¡Ya eres VIP! Gracias por apoyar el juego 💛", 3, PALETTE.oro)
+		return
+	end
+	pcall(function()
+		MarketplaceService:PromptGamePassPurchase(plr, CONFIG.VIP_PASS_ID)
+	end)
+end
+
+-- ========================= BUCLES PRINCIPALES ============================= --
+-- Barras giratorias, martillos, cintas transportadoras y detección del abismo
+RunService.Heartbeat:Connect(function(dt)
+	local t = os.clock()
+	for _, r in ipairs(ROTATORS) do
+		r.part.CFrame = r.pivot * CFrame.Angles(0, t * r.speed, 0)
+	end
+	for _, m in ipairs(PENDULUMS) do
+		local ang = m.maxA * math.sin(m.w * t + m.phase)
+		m.part.CFrame = m.pivot * CFrame.Angles(0, 0, ang) * CFrame.new(-m.len, 0, 0)
+	end
+	for plr in pairs(PDATA) do
+		local char = plr.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local pos = hrp.Position
+			for belt, dir in pairs(CONVEYORS) do
+				if belt.Parent then
+					local bp, bs = belt.Position, belt.Size
+					if math.abs(pos.X - bp.X) < bs.X / 2 + 1
+						and math.abs(pos.Z - bp.Z) < bs.Z / 2 + 1
+						and pos.Y > bp.Y and pos.Y - bp.Y < 6 then
+						local vel = hrp.AssemblyLinearVelocity
+						local proy = vel.X * dir.X + vel.Z * dir.Z
+						local maxV = dir.Magnitude * 1.5
+						if proy < maxV then
+							local add = dir * dt * 60
+							local sobra = maxV - proy
+							if add.Magnitude > sobra then
+								add = dir.Unit * sobra
+							end
+							hrp.AssemblyLinearVelocity = vel + add
+						end
+						break
+					end
+				end
+			end
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 and pos.Y < CONFIG.KILL_Y then
+				local ahora = os.clock()
+				local anterior = DEATHCOOL[plr]
+				if not anterior or ahora - anterior > 0.6 then
+					DEATHCOOL[plr] = ahora
+					hum.Health = 0
+					sonidoEn(hrp, SND.death, 0.7)
+				end
+			end
+		end
+	end
+end)
+
+-- Consejos rotativos en el HUD
+local TIPS = {
+	"💡 Pisa las losetas de colores para comprar estelas y mejoras",
+	"🎁 El cofre dorado da recompensa diaria: ¡racha hasta x7!",
+	"🟪 El portal morado salta una etapa por " .. CONFIG.SKIP_COST .. "⭐",
+	"🟢 La loseta verde te lleva directo a tu checkpoint",
+	"⭐ Ganas puntos en cada checkpoint y +" .. CONFIG.POINTS_WIN .. " al ganar",
+	"🔥 Compra la estela Arcoíris para presumir en los videos",
+	"🏆 La estela Campeón solo se desbloquea ganando el obby",
+	"👑 Los VIP tienen recompensa diaria x2 y tag dorado",
+}
+task.spawn(function()
+	local i = 1
+	while true do
+		local tip = TIPS[i]
+		for plr in pairs(PDATA) do
+			local data = PDATA[plr]
+			if data.__gui then
+				data.__gui.consejo.Text = tip
+			end
+		end
+		i = i + 1
+		if i > #TIPS then i = 1 end
+		task.wait(9)
+	end
+end)
+
+-- Señal de estadísticas del servidor
+task.spawn(function()
+	while true do
+		lblStats.Text = "👥 Visitas: " .. TOTAL.visits
+			.. "\n💀 Muertes: " .. TOTAL.deaths
+			.. "\n🏆 Victorias: " .. TOTAL.wins
+		task.wait(5)
+	end
+end)
+
+-- Tablas globales (OrderedDataStore) cada 60 segundos
+local function refrescarTableroODS(kind, ods, formato)
+	if not DATA_OK then return end
+	local ok, paginas = pcall(function()
+		return ods:GetSortedAsync(false, 10)
+	end)
+	if not ok or not paginas then return end
+	local lineas = {}
+	for _, entrada in ipairs(paginas:GetCurrentPage()) do
+		local uid = tonumber(entrada.key)
+		if uid then
+			table.insert(lineas, nombreDeUsuario(uid) .. " — " .. formato(entrada.value))
+		end
+	end
+	actualizarTablero(kind, lineas)
+end
+
+task.spawn(function()
+	while true do
+		task.wait(60)
+		refrescarTableroODS("etapas", odsStage, function(v)
+			return v .. "/" .. CONFIG.STAGES .. " etapas"
+		end)
+		refrescarTableroODS("puntos", odsPoints, function(v)
+			return v .. " puntos"
+		end)
+	end
+end)
+
+-- Evento sorpresa: lluvia de puntos
+task.spawn(function()
+	while true do
+		task.wait(math.random(CONFIG.EVENT_MIN, CONFIG.EVENT_MAX))
+		for plr in pairs(PDATA) do
+			awardPoints(plr, CONFIG.EVENT_POINTS)
+		end
+		sonidoGlobal(SND.ping, 0.5, 1.2)
+		globalToast("🌈 ¡LLUVIA DE PUNTOS! +" .. CONFIG.EVENT_POINTS .. "⭐ para todos", PALETTE.rosa, 4)
+	end
+end)
+
+-- Música de fondo (opcional)
+if CONFIG.MUSIC_ID > 0 then
+	local musica = Instance.new("Sound")
+	musica.SoundId = "rbxassetid://" .. CONFIG.MUSIC_ID
+	musica.Looped = true
+	musica.Volume = CONFIG.MUSIC_VOLUME
+	musica.Parent = SoundService
+	musica:Play()
+end
+
+-- ======================= JUGADORES: ENTRADA/SALIDA ======================== --
+local function alCaracter(plr, char)
+	local data = PDATA[plr]
+	if not data then return end
+	local hum = char:WaitForChild("Humanoid", 10)
+	local hrp = char:WaitForChild("HumanoidRootPart", 10)
+	if not hum or not hrp then return end
+	applyStats(plr)
+	crearTag(plr)
+	aplicarEstela(plr)
+	hum.Died:Connect(function()
+		TOTAL.deaths = TOTAL.deaths + 1
+		data.Deaths = data.Deaths + 1
+		local ls = plr:FindFirstChild("leaderstats")
+		local m = ls and ls:FindFirstChild("Muertes")
+		if m then
+			m.Value = data.Deaths
+		end
+		toast(plr, "💀 ¡Ups! Vuelves a tu checkpoint", 2.5, Color3.fromRGB(255, 120, 120))
+	end)
+	task.wait(0.15)
+	if plr.Character == char and hum.Health > 0 then
+		local cp = CHECKPOINTS[data.Stage] or CHECKPOINTS[1]
+		teleport(plr, cp)
+	end
+end
+
+local function alEntrar(plr)
+	local data = cargarDatos(plr)
+	PDATA[plr] = data
+	TOTAL.visits = TOTAL.visits + 1
+	crearLeaderstats(plr, data)
+	construirHUD(plr)
+	refreshHUD(plr)
+
+	plr.CharacterAdded:Connect(function(char)
+		alCaracter(plr, char)
+	end)
+	plr.CharacterRemoving:Connect(function()
+		data.__tag = nil
+	end)
+	if plr.Character then
+		task.spawn(alCaracter, plr, plr.Character)
+	end
+
+	-- VIP por pase de juego
+	if CONFIG.VIP_PASS_ID > 0 then
+		task.spawn(function()
+			local ok, owns = pcall(function()
+				return MarketplaceService:UserOwnsGamePassAsync(plr.UserId, CONFIG.VIP_PASS_ID)
+			end)
+			if ok and owns and not data.VIP then
+				data.VIP = true
+				actualizarTag(plr)
+				refreshHUD(plr)
+				toast(plr, "👑 ¡Bienvenido de nuevo, VIP! Recompensas x2 activas", 4, PALETTE.oro)
+			end
+		end)
+	end
+
+	-- Saludo de bienvenida
+	task.delay(1.5, function()
+		local d = PDATA[plr]
+		if not d then return end
+		toast(plr, "🎉 ¡Bienvenido a " .. CONFIG.GAME_NAME .. "! +" .. CONFIG.WELCOME_POINTS .. "⭐ de regalo", 4, PALETTE.amarillo)
+		local g = d.__gui
+		if g and g.bienvenida then
+			g.bienvenida.Visible = true
+			task.delay(7, function()
+				if g.bienvenida and g.bienvenida.Parent then
+					g.bienvenida.Visible = false
+				end
+			end)
+		end
+	end)
+end
+
+local function alSalir(plr)
+	guardarTablas(plr)
+	PDATA[plr] = nil
+	DEATHCOOL[plr] = nil
+	lastSave[plr] = nil
+	saving[plr] = nil
+end
+
+Players.PlayerAdded:Connect(alEntrar)
+Players.PlayerRemoving:Connect(alSalir)
+for _, plr in ipairs(Players:GetPlayers()) do
+	task.spawn(alEntrar, plr)
+end
+
+-- Autoguardado
+task.spawn(function()
+	while true do
+		task.wait(CONFIG.AUTOSAVE_SECONDS)
+		for plr in pairs(PDATA) do
+			guardarTablas(plr)
+		end
+	end
+end)
+
+game:BindToClose(function()
+	for plr in pairs(PDATA) do
+		guardarTablas(plr)
+	end
+end)
+
+-- =============================== ARRANQUE ================================= --
+print("==================================================")
+print("  🎮 " .. CONFIG.GAME_NAME .. " v" .. CONFIG.VERSION .. " — cargado ✔")
+print("  Mapa con " .. CONFIG.STAGES .. " etapas, lobby, tienda y UIs listos.")
+if not DATA_OK then
+	print("  ⚠ Activa 'Studio Access to API Services' para guardar progreso.")
+end
+print("==================================================")
